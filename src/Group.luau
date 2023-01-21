@@ -1,20 +1,34 @@
-type map = {[string]: any}
+--[=[ .luau
+
+	| Group
+	| bytejon
+	| 2023
+	
+	A module for storing state objects in a key-value structure.
+	Attempts to 'get' a state that has not been defined will return nil instead of erroring.
+
+--]=]
+
+-- typedefs
+type map = { [string] : any }
 type callback = (...any) -> (...any)
 
-local threads = {} -- thread pool
+-- thread cache
+local threads = {}
 
+-- creates and resumes a new thread
 local load = function(code: callback, ...: any): thread
 	local thread = coroutine.create(code)
 	coroutine.resume(thread, ...)
 	return thread
 end
 
--- main function for thread reusability
-local main = function()
+-- main function enabling thread reuse
+local main = function(): nil
 	local thread = coroutine.running()
-	local ref, code, value, argc, argv = nil, nil, nil, nil, nil
+	local ref, code, argc, argv, value = nil, nil, nil, nil, nil
 	while true do
-		ref, code, value, argc, argv = coroutine.yield()
+		ref, code, argc, argv, value = coroutine.yield()
 		if ref == threads then
 			code(value, table.unpack(argv, 1, argc))
 			table.insert(threads, thread)
@@ -23,122 +37,71 @@ local main = function()
 	return nil
 end
 
--- returns the state table or also creates it if it does not exist
-local get_state = function(self, key, value)
-	if not self._states[key] then
-		self._states[key] = { value = value, initial = value, cns = {} }
+local module = {}
+export type Group = typeof(module) & {
+	state : map,
+	cache : { [string] : map }
+}
+
+-- returns specified state table or also creates it if does not exist
+local get_state = function(self: Group, key: string, value: any?)
+	if self.cache[key] ==  nil then
+		self.cache[key] = { value = value, cns = {} }
 	end
-	return self._states[key]
+	return self.cache[key]
 end
 
-local group = {}
-export type Group = typeof(group)
-
--- returns the value specified by the key
-function group:get(key: string): any
-	return get_state(self, key).value
+-- wrapper function for setting the property of an object to a value
+local set_prop = function(value, object, prop): nil
+	object[prop] = value
+	return nil
 end
 
--- sets the value specified to a new value if they are not the same (force option)
-function group:set(key: string, value: any, force: boolean?): nil
-	local state = get_state(self, key, value)
-	if state.value ~= value or force == true then
-		state.value = value
-		for _, data in state.cns do
-			coroutine.resume(table.remove(threads) or load(main), threads, data[1], value, data[2], data[3])
-		end
+-- returns the state value specified by the key
+function module.get(self: Group, key: string): any
+	return if self.cache[key] then self.cache[key].value else nil
+end
+
+-- sets the state value specified by the key to the new value
+function module.set(self: Group, key: string, value: any): nil
+	local state = get_state(self, key)
+	state.value = value
+	self.state[key] = value
+	for _, data in state.cns do
+		coroutine.resume(table.remove(threads) or load(main), threads, data[1], data[2], data[3], value)
 	end
 	return nil
 end
 
--- sets the value to the return value of the callback if non-nil
-function group:exec(key: string, code: callback, ...: any): nil
+-- sets the state value specified by the key to the value returned by the callback if non-nil
+function module.exec(self: Group, key: string, code: callback, ...: any): nil
 	local state = get_state(self, key)
-	local value = code(state.value, ...)
+	local value = code(key, ...)
 	if value ~= nil then
 		state.value = value
+		self.state[key] = value
 		for _, data in state.cns do
-			coroutine.resume(table.remove(threads) or load(main), threads, data[1], value, data[2], data[3])
+			coroutine.resume(table.remove(threads) or load(main), threads, data[1], data[2], data[3], value)
 		end
 	end
 	return nil
 end
 
--- sets the value to the initial value if they are not the same (force option)
-function group:reset(key: string, force: boolean?): nil
+-- calls the callback when the state value specified by the key when the state emits
+function module.listen(self: Group, key: string, code: callback, ...: any): callback
 	local state = get_state(self, key)
-	local value = state.initial
-	if state.value ~= value or force == true then
-		state.value = value
-		for _, data in state.cns do
-			coroutine.resume(table.remove(threads) or load(main), threads, data[1], value, data[2], data[3])
-		end
-	end
-	return nil
-end
-
--- calls callback when state value changes
--- returns a function to disconnect listener when called
-function group:listen(key: string, code: callback, ...: any): callback
-	local state = get_state(self, key)
+	local conn = { code, select('#', ...), {...} }
 	local cns = state.cns
-	local connection = {code, select('#', ...), {...}}
-	table.insert(cns, connection)
+	table.insert(cns, conn)
 	return function()
-		table.remove(cns, table.find(cns, connection))
-		return nil
+		return table.remove(cns, table.find(cns, conn))
 	end
 end
 
--- cleans up value and removes from states
-function group:clean(key: string, code: callback?, ...: any): nil
-	local state = get_state(self, key)
-	local value = state.value
-	if not code then
-		local vtype = typeof(value)
-		if vtype == "Instance" then
-			value:Destroy()
-		elseif vtype == "RBXScriptConnection" then
-			value:Disconnect()
-		elseif vtype == "function" then
-			value()
-		elseif vtype == "thread" then
-			if coroutine.status(value) == "suspended" then
-				coroutine.close(value)
-			end
-		elseif vtype == "table" then
-			if value.Destroy then value:Destroy() end
-			if value.Disconnect then value:Disconnect() end
-		end
-	else
-		code(value, ...)
-	end
-	table.clear(state)
-	self._states[key] = nil
-	return nil
+-- binds an object's property value to the state value specified by the key
+-- when the state value changes, the object property will change
+function module.bind(self: Group, key: string, object: Instance, prop: string)
+	return self:listen(key, set_prop, object, prop)
 end
 
--- cleans up all states in the group without destroying
-function group:clear(): nil
-	for key in self._states do
-		self:clean(key)
-	end
-	return nil
-end
-
--- cleans up the group object
-function group:destroy(): nil
-	self:clear()
-	table.clear(self)
-	return nil
-end
-
--- new state group constructor
-return function(data: map): Group
-	local self = table.clone(group)
-	self._states = {}
-	for k, v in data do
-		self._states[k] = { value = v, initial = v, cns = {} }
-	end
-	return self
-end
+return module
