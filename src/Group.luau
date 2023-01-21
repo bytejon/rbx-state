@@ -44,9 +44,9 @@ export type Group = typeof(module) & {
 }
 
 -- returns specified state table or also creates it if does not exist
-local get_state = function(self: Group, key: string, value: any?)
+local get_state = function(self: Group, key: string): map
 	if self.cache[key] ==  nil then
-		self.cache[key] = { value = value, cns = {} }
+		self.cache[key] = { value = nil, cns = {} }
 	end
 	return self.cache[key]
 end
@@ -100,7 +100,7 @@ end
 
 -- binds an object's property value to the state value specified by the key
 -- when the state value changes, the object property will change
-function module.bind(self: Group, key: string, object: Instance, prop: string)
+function module.bind(self: Group, key: string, object: Instance, prop: string): callback
 	return self:listen(key, set_prop, object, prop)
 end
 
