@@ -104,4 +104,12 @@ function module.bind(self: Group, key: string, object: Instance, prop: string): 
 	return self:listen(key, set_prop, object, prop)
 end
 
-return module
+return function(data: map): Group
+	local self = table.clone(module)
+	self.state = {}
+	self.cache = {}
+	for key, value in data do
+		self.cache[key] = { value = value, cns = {} }
+	end
+	return self
+end
